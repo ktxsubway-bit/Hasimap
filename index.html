@@ -1,0 +1,368 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>HASI MAP - 가성비 식당 탐색기</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, collection, addDoc, onSnapshot, query, serverTimestamp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        const mainFirebaseConfig = {
+            apiKey: "AIzaSyBS5WPpmyISgEa3EfLkCpKLkeTHkWs4Dgg",
+            authDomain: "schooltime-9b21c.firebaseapp.com",
+            projectId: "schooltime-9b21c",
+            storageBucket: "schooltime-9b21c.firebasestorage.app",
+            messagingSenderId: "92438652180",
+            appId: "1:92438652180:web:19c43fb34a0a9d2ca28e01",
+            measurementId: "G-S5KGBNCHFP"
+        };
+
+        const finalConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : mainFirebaseConfig;
+        const app = initializeApp(finalConfig);
+        const auth = getAuth(app);
+        const db = getFirestore(app);
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'schooltime-9b21c';
+
+        window.fb = { 
+            db, auth, appId,
+            methods: { collection, addDoc, onSnapshot, query, serverTimestamp } 
+        };
+
+        const bootstrap = async () => {
+            try {
+                onAuthStateChanged(auth, (user) => {
+                    const statusEl = document.getElementById('auth-status');
+                    if (user) {
+                        statusEl.innerText = "서버 연결 성공 (기록 가능)";
+                        statusEl.className = "text-[10px] font-bold text-green-600 uppercase";
+                        window.startListening();
+                    } else {
+                        statusEl.innerText = "로그인 시도 중...";
+                    }
+                });
+
+                if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+                    await signInWithCustomToken(auth, __initial_auth_token);
+                } else {
+                    await signInAnonymously(auth);
+                }
+            } catch (err) { 
+                console.error("Auth error:", err);
+                document.getElementById('auth-status').innerText = "접속 실패: " + err.code;
+            }
+        };
+
+        window.onload = bootstrap;
+    </script>
+
+    <style>
+        body, html { margin: 0; padding: 0; height: 100%; width: 100%; overflow: hidden; touch-action: none; }
+        #map { height: calc(100vh - 64px); width: 100%; z-index: 1; background: #f8f9fa; }
+        .custom-controls { position: absolute; top: 12px; left: 50%; transform: translateX(-50%); z-index: 1000; width: 92%; max-width: 500px; pointer-events: none; }
+        .custom-controls > * { pointer-events: auto; }
+        .hasi-marker-compact { display: flex !important; align-items: center; justify-content: center; background: #2563eb; color: white; border: 2.5px solid white; border-radius: 50% 50% 50% 0; transform: rotate(-45deg); box-shadow: 0 4px 10px rgba(0,0,0,0.3); font-weight: 900; font-size: 14px; width: 32px; height: 32px; }
+        .hasi-marker-compact span { transform: rotate(45deg); display: block; }
+        .hasi-label { position: absolute; left: 38px; top: -2px; background: white; padding: 4px 10px; border-radius: 12px; box-shadow: 0 4px 12px rgba(0,0,0,0.15); border: 1px solid #e5e7eb; white-space: nowrap; pointer-events: none; display: none; }
+        .zoom-high .hasi-label { display: block; }
+        .user-location-dot { width: 18px; height: 18px; background: #4285F4; border: 3px solid white; border-radius: 50%; box-shadow: 0 0 10px rgba(66, 133, 244, 0.5); }
+        
+        /* 로딩 애니메이션 */
+        .searching-loader {
+            display: inline-block; width: 12px; height: 12px;
+            border: 2px solid #e2e8f0; border-top-color: #3b82f6;
+            border-radius: 50%; animation: spin 0.8s linear infinite;
+        }
+        @keyframes spin { to { transform: rotate(360deg); } }
+    </style>
+</head>
+<body class="bg-gray-100 font-sans text-gray-900">
+
+    <header class="bg-white shadow-sm h-16 flex items-center px-4 justify-between border-b relative z-20">
+        <div class="flex items-center space-x-2">
+            <div class="bg-blue-600 p-1.5 rounded-lg">
+                <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17.657 16.657L13.414 20.9a1.998 1.998 0 01-2.827 0l-4.244-4.243a8 8 0 1111.314 0z" /></svg>
+            </div>
+            <h1 class="text-lg font-black tracking-tighter italic uppercase">HASI <span class="text-blue-600">MAP</span></h1>
+        </div>
+        <div id="auth-status" class="text-[10px] font-bold text-gray-400 uppercase tracking-widest">연결 확인 중...</div>
+    </header>
+
+    <main class="relative h-full">
+        <div class="custom-controls space-y-3" id="main-controls">
+            <div class="bg-white rounded-2xl shadow-xl border border-gray-100 overflow-hidden flex items-center pr-2">
+                <input id="search-input" type="text" placeholder="장소 검색" class="flex-grow p-3 outline-none bg-transparent text-sm" onkeypress="if(event.keyCode==13) searchLocation('main')">
+                <button onclick="searchLocation('main')" class="p-2">🔍</button>
+            </div>
+            <div class="flex justify-between items-center">
+                <div id="location-info" class="bg-white/90 backdrop-blur px-3 py-1.5 rounded-full text-[10px] font-bold text-gray-500 shadow-sm border border-gray-100 italic uppercase">READY TO EXPLORE</div>
+                <button onclick="openRegModal()" class="bg-blue-600 text-white px-5 py-2.5 rounded-full shadow-lg font-bold text-sm active:scale-95 transition-all">➕ 식당 등록</button>
+            </div>
+        </div>
+
+        <div id="map"></div>
+        <div id="map-picker-ui" class="hidden absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-full z-[1500] pointer-events-none">
+            <svg class="w-10 h-10 text-red-500 drop-shadow-lg" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2C8.13 2 5 5.13 5 9c0 5.25 7 13 7 13s7-7.75 7-13c0-3.87-3.13-7-7-7zm0 9.5c-1.38 0-2.5-1.12-2.5-2.5s1.12-2.5 2.5-2.5 2.5 1.12 2.5 2.5-1.12 2.5-2.5 2.5z"/></svg>
+        </div>
+
+        <div id="info-panel" class="hidden absolute bottom-0 left-0 right-0 z-[2000] bg-white rounded-t-3xl shadow-2xl p-6">
+            <div class="w-12 h-1.5 bg-gray-200 rounded-full mx-auto mb-6"></div>
+            <h3 id="info-name" class="text-2xl font-black text-gray-900 tracking-tight"></h3>
+            <p id="info-meta" class="text-sm font-bold text-blue-600 mt-1 mb-4"></p>
+            <p id="info-addr" class="text-xs text-gray-400 mb-6"></p>
+            <div class="grid grid-cols-2 gap-3 mb-4">
+                <button id="nav-kakao" class="py-3 bg-[#FEE500] rounded-xl font-bold text-sm">카카오</button>
+                <button id="nav-naver" class="py-3 bg-[#03C75A] text-white rounded-xl font-bold text-sm">네이버</button>
+            </div>
+            <button onclick="closePanel()" class="w-full bg-gray-100 py-3 rounded-xl font-bold">닫기</button>
+        </div>
+
+        <!-- Registration Modal -->
+        <div id="reg-modal" class="hidden fixed inset-0 z-[4000] bg-black/60 backdrop-blur-sm flex items-center justify-center p-4">
+            <div class="bg-white rounded-3xl w-full max-w-sm p-6 shadow-2xl">
+                <h2 class="text-xl font-black mb-5 text-blue-600 italic">NEW RESTAURANT</h2>
+                <div class="space-y-4">
+                    <div class="flex flex-col gap-1.5">
+                        <label class="text-[10px] font-bold text-gray-400 px-1 uppercase">ADDRESS / LOCATION</label>
+                        <div class="flex gap-2 relative">
+                            <input id="reg-addr" type="text" placeholder="주소를 입력하세요" 
+                                   class="flex-grow bg-gray-50 p-3 rounded-xl text-xs font-bold border border-gray-200 outline-none focus:border-blue-300 transition-colors"
+                                   oninput="handleAddressInput(this.value)"
+                                   onblur="searchLocation('reg')"
+                                   onkeypress="if(event.keyCode==13) searchLocation('reg')">
+                            <button onclick="startPicking()" class="bg-blue-600 text-white px-3 rounded-xl shadow-md">📍 핀</button>
+                        </div>
+                        <div id="reg-coords-status" class="flex items-center gap-1.5 text-[9px] text-gray-400 px-1 italic">
+                            주소를 입력하면 위치가 자동 조회됩니다.
+                        </div>
+                    </div>
+                    <input id="reg-name" type="text" placeholder="식당 이름" class="w-full bg-gray-50 p-3 rounded-xl font-bold border border-gray-200 outline-none">
+                    <div class="flex gap-2">
+                        <input id="reg-menu" type="text" placeholder="대표 메뉴" class="w-1/2 bg-gray-50 p-3 rounded-xl font-bold border border-gray-200">
+                        <input id="reg-price" type="number" placeholder="가격 (숫자만)" class="w-1/2 bg-gray-50 p-3 rounded-xl font-bold border border-gray-200">
+                    </div>
+                </div>
+                <div class="flex gap-2 mt-8">
+                    <button onclick="closeRegModal()" class="flex-1 py-3 text-gray-400 font-bold">CANCEL</button>
+                    <button id="save-btn" onclick="saveShop()" class="flex-1 py-3 bg-blue-600 text-white rounded-xl font-bold shadow-lg active:scale-95 transition-all">SAVE</button>
+                </div>
+            </div>
+        </div>
+
+        <div id="picker-confirm-ui" class="hidden absolute bottom-10 left-1/2 -translate-x-1/2 z-[3000] w-full px-6 max-sm">
+            <button id="picker-btn" class="w-full bg-blue-600 text-white py-4 rounded-2xl shadow-2xl font-black">이 위치로 설정</button>
+        </div>
+    </main>
+
+    <script>
+        let map;
+        let userMarker;
+        let userPos = [37.5665, 126.9780];
+        let shopLayer;
+        let markersMap = new Map();
+        let currentRegCoords = null;
+        let isListening = false;
+        let addressDebounceTimer;
+
+        function initMap() {
+            map = L.map('map', { zoomControl: false, tap: false });
+            L.tileLayer('https://{s}.basemaps.cartocdn.com/rastertiles/voyager_labels_under/{z}/{x}/{y}{r}.png', { attribution: 'HASI' }).addTo(map);
+            shopLayer = L.layerGroup().addTo(map);
+            map.setView(userPos, 14);
+            
+            map.on('zoomend', () => {
+                const container = document.getElementById('map');
+                if (map.getZoom() >= 16) container.classList.add('zoom-high');
+                else container.classList.remove('zoom-high');
+            });
+
+            if ("geolocation" in navigator) {
+                navigator.geolocation.getCurrentPosition((position) => {
+                    userPos = [position.coords.latitude, position.coords.longitude];
+                    if (userMarker) map.removeLayer(userMarker);
+                    userMarker = L.marker(userPos, { icon: L.divIcon({ className: 'user-location-dot', iconSize: [18, 18] }) }).addTo(map);
+                    map.setView(userPos, 15);
+                });
+            }
+        }
+
+        window.startListening = () => {
+            if (isListening) return;
+            isListening = true;
+            const { db, methods, appId } = window.fb;
+            const colRef = methods.collection(db, 'artifacts', appId, 'public', 'data', 'shops');
+            
+            methods.onSnapshot(colRef, (snapshot) => {
+                snapshot.docChanges().forEach((change) => {
+                    const id = change.doc.id;
+                    const data = change.doc.data();
+                    if (change.type === "added" || change.type === "modified") {
+                        if (markersMap.has(id)) shopLayer.removeLayer(markersMap.get(id));
+                        addMarker(id, data);
+                    } else if (change.type === "removed") {
+                        if (markersMap.has(id)) { shopLayer.removeLayer(markersMap.get(id)); markersMap.delete(id); }
+                    }
+                });
+            }, (err) => {
+                console.error("Firestore Listen Error:", err);
+                document.getElementById('auth-status').innerText = "권한 부족";
+            });
+        };
+
+        function addMarker(id, data) {
+            const m = L.marker([data.lat, data.lng], {
+                icon: L.divIcon({ 
+                    html: `<div class="hasi-marker-wrapper"><div class="hasi-marker-compact"><span>H</span></div><div class="hasi-label"><div class="text-[11px] font-bold">${data.name}</div><div class="text-[10px] text-blue-600">${data.price}</div></div></div>`,
+                    className: '', iconSize: [32, 32], iconAnchor: [16, 32] 
+                })
+            }).on('click', () => showInfo(data)).addTo(shopLayer);
+            markersMap.set(id, m);
+        }
+
+        async function saveShop() {
+            const { db, auth, methods, appId } = window.fb;
+            if (!auth.currentUser) { alert("서버에 접속 중입니다."); return; }
+            
+            const name = document.getElementById('reg-name').value.trim();
+            const menu = document.getElementById('reg-menu').value.trim();
+            const price = document.getElementById('reg-price').value.trim();
+            const addr = document.getElementById('reg-addr').value.trim();
+            
+            if (!name || !menu || !price || !addr || !currentRegCoords) {
+                alert("모든 필드를 입력하고 주소 조회가 완료되어야 합니다.");
+                return;
+            }
+
+            const btn = document.getElementById('save-btn');
+            btn.disabled = true; btn.innerText = "저장 중...";
+
+            try {
+                const collectionRef = methods.collection(db, 'artifacts', appId, 'public', 'data', 'shops');
+                await methods.addDoc(collectionRef, {
+                    name, menu, addr,
+                    price: Number(price).toLocaleString() + '원',
+                    lat: currentRegCoords.lat,
+                    lng: currentRegCoords.lng,
+                    createdAt: methods.serverTimestamp()
+                });
+                alert("등록 성공!");
+                closeRegModal();
+                resetForm();
+            } catch (e) {
+                console.error(e);
+                alert("오류 발생: " + e.message);
+            } finally {
+                btn.disabled = false; btn.innerText = "SAVE";
+            }
+        }
+
+        // 주소 자동 조회를 위한 입력 핸들러 (Debounce)
+        function handleAddressInput(val) {
+            clearTimeout(addressDebounceTimer);
+            if (!val || val.length < 3) return;
+            
+            updateCoordStatus('searching');
+            addressDebounceTimer = setTimeout(() => {
+                searchLocation('reg', true);
+            }, 800);
+        }
+
+        async function searchLocation(mode, isAuto = false) {
+            const input = document.getElementById(mode === 'main' ? 'search-input' : 'reg-addr');
+            const val = input.value.trim();
+            if (!val) return;
+
+            if (mode === 'reg') updateCoordStatus('searching');
+
+            try {
+                const res = await fetch(`https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(val)}&limit=1`);
+                const data = await res.json();
+                if (data[0]) {
+                    const lat = Number(data[0].lat), lng = Number(data[0].lon);
+                    map.setView([lat, lng], 17);
+                    if (mode === 'reg') { 
+                        currentRegCoords = { lat, lng }; 
+                        updateCoordStatus('success'); 
+                    }
+                } else {
+                    if (mode === 'reg') updateCoordStatus('fail');
+                    if (!isAuto) alert("위치를 찾을 수 없습니다.");
+                }
+            } catch (e) { 
+                console.error(e); 
+                if (mode === 'reg') updateCoordStatus('fail');
+            }
+        }
+
+        function updateCoordStatus(state) {
+            const el = document.getElementById('reg-coords-status');
+            switch(state) {
+                case 'searching':
+                    el.innerHTML = `<span class="searching-loader"></span> <span class="text-blue-500 font-bold">위치 검색 중...</span>`;
+                    break;
+                case 'success':
+                    el.innerHTML = `✅ <span class="text-green-600 font-bold">위치 설정 완료 (지도 확인)</span>`;
+                    break;
+                case 'fail':
+                    el.innerHTML = `❌ <span class="text-red-500 font-bold">위치를 찾을 수 없음 (주소를 더 정확히 써주세요)</span>`;
+                    break;
+                default:
+                    el.innerHTML = `주소를 입력하면 위치가 자동 조회됩니다.`;
+            }
+        }
+
+        function startPicking() {
+            document.getElementById('main-controls').classList.add('hidden');
+            document.getElementById('reg-modal').classList.add('hidden');
+            document.getElementById('map-picker-ui').classList.remove('hidden');
+            document.getElementById('picker-confirm-ui').classList.remove('hidden');
+            
+            document.getElementById('picker-btn').onclick = async () => {
+                const center = map.getCenter();
+                currentRegCoords = { lat: center.lat, lng: center.lng };
+                try {
+                    const res = await fetch(`https://nominatim.openstreetmap.org/reverse?format=json&lat=${center.lat}&lon=${center.lng}&accept-language=ko`);
+                    const data = await res.json();
+                    document.getElementById('reg-addr').value = data.display_name.split(',').reverse().slice(3).reverse().join(' ').trim();
+                } catch(e) { document.getElementById('reg-addr').value = "지도에서 선택한 지점"; }
+                updateCoordStatus('success');
+                document.getElementById('reg-modal').classList.remove('hidden');
+                cancelPicker();
+            };
+        }
+
+        function cancelPicker() {
+            document.getElementById('main-controls').classList.remove('hidden');
+            document.getElementById('map-picker-ui').classList.add('hidden');
+            document.getElementById('picker-confirm-ui').classList.add('hidden');
+        }
+
+        function resetForm() {
+            ['reg-name', 'reg-menu', 'reg-price', 'reg-addr'].forEach(id => document.getElementById(id).value = '');
+            currentRegCoords = null;
+            updateCoordStatus('default');
+        }
+
+        function showInfo(data) {
+            document.getElementById('info-name').innerText = data.name;
+            document.getElementById('info-meta').innerText = `${data.menu} · ${data.price}`;
+            document.getElementById('info-addr').innerText = data.addr;
+            document.getElementById('nav-kakao').onclick = () => window.open(`https://map.kakao.com/link/to/${data.name},${data.lat},${data.lng}`);
+            document.getElementById('nav-naver').onclick = () => window.open(`https://map.naver.com/v5/directions/-/-/${data.lng},${data.lat},${data.name}/-/walk`);
+            document.getElementById('info-panel').classList.remove('hidden');
+            map.panTo([data.lat, data.lng]);
+        }
+
+        window.closePanel = () => document.getElementById('info-panel').classList.add('hidden');
+        window.openRegModal = () => document.getElementById('reg-modal').classList.remove('hidden');
+        window.closeRegModal = () => { document.getElementById('reg-modal').classList.add('hidden'); cancelPicker(); };
+
+        initMap();
+    </script>
+</body>
+</html>
